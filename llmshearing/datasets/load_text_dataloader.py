@@ -1,4 +1,4 @@
-""" Load text dataloader for training and evaluation. """
+""" Load text dataloader specifically for supervised fine-tuning on question-code pairs. """
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -18,7 +18,7 @@ from llmshearing.datasets.streaming_dataset import (
 
 def build_text_dataloader(cfg: DictConfig, device_batch_size: int, dynamic: bool = False, 
                           set_names: str = None, proportion: List[float] = None) -> DataLoader:
-    """Builds a text dataloader.
+    """Builds a text dataloader for SFT on question-code pairs.
 
     Args:
         cfg (DictConfig): Configuration dictionary.
@@ -36,12 +36,9 @@ def build_text_dataloader(cfg: DictConfig, device_batch_size: int, dynamic: bool
         dataset = TextDynamicStreamingDataset(local=cfg.dataset.local,
                                               max_seq_len=cfg.dataset.max_seq_len,
                                               batch_size=device_batch_size,
-                                              shuffle=cfg.dataset.get(
-                                                'shuffle', False),
-                                              shuffle_seed=cfg.dataset.get(
-                                                'shuffle_seed', 9176),
-                                              num_canonical_nodes=cfg.dataset.get(
-                                                'num_canonical_nodes', 128),
+                                              shuffle=cfg.dataset.get('shuffle', False),
+                                              shuffle_seed=cfg.dataset.get('shuffle_seed', 9176),
+                                              num_canonical_nodes=cfg.dataset.get('num_canonical_nodes', 128),
                                               proportion=proportion,
                                               set_names=set_names,
                                               is_uint16=cfg.dataset.get("is_uint16", False))
@@ -52,24 +49,18 @@ def build_text_dataloader(cfg: DictConfig, device_batch_size: int, dynamic: bool
             split=cfg.dataset.get('split', None),
             shuffle=cfg.dataset.get('shuffle', False),
             shuffle_seed=cfg.dataset.get('shuffle_seed', 9176),
-            num_canonical_nodes=cfg.dataset.get(
-                'num_canonical_nodes', 128),
+            num_canonical_nodes=cfg.dataset.get('num_canonical_nodes', 128),
             batch_size=device_batch_size,
             is_uint16=cfg.dataset.get("is_uint16", False))
 
     tokenizer = AutoTokenizer.from_pretrained(cfg.dataset.tokenizer_name)
-    if isinstance(dataset[0], Mapping) and "set" in dataset[0]:
-        COLLATE_FN = DataCollatorForLMWithSetName
-        collate_fn = COLLATE_FN(
-        set_names=set_names,
+    COLLATE_FN = DataCollatorForQuestionCodeSFT
+    collate_fn = COLLATE_FN(
         tokenizer=tokenizer,
-        mlm=False)
-    else:
-        COLLATE_FN = transformers.DataCollatorForLanguageModeling
-        collate_fn = COLLATE_FN(
-            tokenizer=tokenizer,
-            mlm=False,
-        )
+        set_names=set_names,
+        pad_to_multiple_of=cfg.dataset.get('pad_to_multiple_of', 8),
+        mlm=False
+    )
     
     return DataLoader(
         dataset,
@@ -85,34 +76,42 @@ def build_text_dataloader(cfg: DictConfig, device_batch_size: int, dynamic: bool
 
 
 @dataclass
-class DataCollatorForLMWithSetName(object):
-    """ Data collator used for language modeling with set (domain) name. """
-    tokenizer: PreTrainedTokenizerBase # dataclass field must have types 
+class DataCollatorForQuestionCodeSFT:
+    """ Data collator used for supervised fine-tuning on question-code pairs. """
+    tokenizer: PreTrainedTokenizerBase
+    set_names: List[str]
     pad_to_multiple_of: Optional[int] = None
     return_tensors: str = "pt"
-    set_names: List[str] = None
     mlm: bool = False
-
-    def __call__(self, features, return_tensors=None):
-        return self.torch_call(features)
 
     def __post_init__(self):
         self.set_name_to_id = defaultdict(int)
         self.set_name_to_id.update({name: i for i, name in enumerate(self.set_names)})
 
-    def torch_call(self, examples: List[Union[List[int], Any, Dict[str, Any]]]) -> Dict[str, Any]:
-        input_ids = [example["input_ids"] for example in examples]
-        batch = {
-            "input_ids": _torch_collate_batch(input_ids, self.tokenizer, pad_to_multiple_of=self.pad_to_multiple_of)
-        }
+    def __call__(self, features: List[Dict[str, Any]], return_tensors=None) -> Dict[str, Any]:
+        """Processes question-code pairs for model input and labels."""
+        input_texts = [f"{feature['question']} [SEP] {feature['code']}" for feature in features]
+        encodings = self.tokenizer(
+            input_texts,
+            padding="longest",
+            truncation=True,
+            max_length=self.tokenizer.model_max_length,
+            return_tensors=self.return_tensors,
+            pad_to_multiple_of=self.pad_to_multiple_of
+        )
 
-        labels = batch["input_ids"].clone()
+        labels = encodings["input_ids"].clone()
         if self.tokenizer.pad_token_id is not None:
-            labels[labels == self.tokenizer.pad_token_id] = -100
-        batch["labels"] = labels
-        # pass the domain name of each example 
-        batch["set"] = torch.tensor(
-            [self.set_name_to_id[example["set"]] for example in examples])
-        if "idx" in examples[0]:
-            batch["idx"] = torch.tensor([example["idx"] for example in examples])
+            labels[labels == self.tokenizer.pad_token_id] = -100  # Ignore padding in loss
+
+        batch = {
+            "input_ids": encodings["input_ids"],
+            "attention_mask": encodings["attention_mask"],
+            "labels": labels,
+            "set": torch.tensor([self.set_name_to_id[feature["set"]] for feature in features])
+        }
+        
+        if "idx" in features[0]:
+            batch["idx"] = torch.tensor([feature["idx"] for feature in features])
+
         return batch
