@@ -23,20 +23,18 @@ from torch import nn
 from torch.optim.optimizer import Optimizer
 
 from llmshearing.callbacks.callbacks import DebugCallback
-from llmshearing.callbacks.dynamic_loading_callback import \
-    DynamicLoadingCallback
+from llmshearing.callbacks.dynamic_loading_callback import DynamicLoadingCallback
 from llmshearing.callbacks.pruning_callback import PruningCallback
 from llmshearing.datasets.load_text_dataloader import build_text_dataloader
 from llmshearing.models.model_registry import COMPOSER_MODEL_REGISTRY
 
+# Clean stale shared memory for fresh execution
 streaming.base.util.clean_stale_shared_memory()
-
 
 def build_code_generation_model(cfg: DictConfig):
     """Initialize model for code generation tasks."""
     warnings.filterwarnings(action='ignore', message='Torchmetrics.*')
     return COMPOSER_MODEL_REGISTRY[cfg.name](cfg)
-
 
 def build_code_generation_evaluator(cfg: DictConfig, model):
     """Setup evaluation for code generation tasks with appropriate metrics."""
@@ -45,9 +43,8 @@ def build_code_generation_evaluator(cfg: DictConfig, model):
         dataloader=build_text_dataloader(
             cfg.eval_loader, cfg.device_eval_batch_size, dynamic=False,
             set_names=cfg.callbacks.data_loading.set_names),
-        metric_names=['BLEU', 'CodeBLEU', 'accuracy'])  # 适用于代码生成的评估指标
+        metric_names=['BLEU', 'CodeBLEU', 'accuracy'])  # Updated for code generation
     return [eval_loader]
-
 
 def load_model_weights(cfg: DictConfig):
     """Load weights for fine-tuning model initialization."""
@@ -58,7 +55,6 @@ def load_model_weights(cfg: DictConfig):
         print("Loaded model weights from path:", cfg.model.path)
         return state_dict
     return None
-
 
 def setup_optimizer(model: torch.nn.Module, optimizer_cfg: Dict[str, Any]) -> Optimizer:
     """Configure optimizer with appropriate parameter groups for SFT."""
@@ -73,7 +69,6 @@ def setup_optimizer(model: torch.nn.Module, optimizer_cfg: Dict[str, Any]) -> Op
         return DecoupledAdamW(param_groups, **optimizer_cfg)
     else:
         raise ValueError(f'Unsupported optimizer: {optimizer_cfg["name"]}')
-
 
 def main(cfg):
     """Main function to initialize SFT training for code generation."""
